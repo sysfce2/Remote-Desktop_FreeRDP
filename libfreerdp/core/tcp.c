@@ -263,8 +263,12 @@ static long transport_bio_simple_ctrl(BIO* bio, int cmd, long arg1, void* arg2)
 			} while ((status < 0) && (errno == EINTR));
 
 #endif
+			/* Convert timeout to error return */
+			if (status == 0)
+				errno = ETIMEDOUT;
 		}
 		break;
+
 		case BIO_C_WAIT_WRITE:
 		{
 			int timeout = (int)arg1;
@@ -298,14 +302,12 @@ static long transport_bio_simple_ctrl(BIO* bio, int cmd, long arg1, void* arg2)
 			} while ((status < 0) && (errno == EINTR));
 
 #endif
+			/* Convert timeout to error return */
+			if (status == 0)
+				errno = ETIMEDOUT;
 		}
 		break;
-		default:
-			break;
-	}
 
-	switch (cmd)
-	{
 		case BIO_C_SET_FD:
 			if (arg2)
 			{
@@ -336,11 +338,8 @@ static long transport_bio_simple_ctrl(BIO* bio, int cmd, long arg1, void* arg2)
 			status = 1;
 			break;
 
-		case BIO_CTRL_DUP:
-			status = 1;
-			break;
-
 		case BIO_CTRL_FLUSH:
+		case BIO_CTRL_DUP:
 			status = 1;
 			break;
 
@@ -1177,21 +1176,48 @@ int freerdp_tcp_default_connect(rdpContext* context, rdpSettings* settings, cons
 			}
 			freerdp_set_last_error_log(context, 0);
 
+			/* By default we take the first returned entry.
+			 *
+			 * If PreferIPv6OverIPv4 = TRUE we force to IPv6 if there
+			 * is such an address available, but fall back to first if not found
+			 */
 			addr = result;
-
-			if ((addr->ai_family == AF_INET6) && (addr->ai_next != 0) &&
-			    !settings->PreferIPv6OverIPv4)
+			if (freerdp_settings_get_bool(settings, FreeRDP_PreferIPv6OverIPv4))
 			{
-				while ((addr = addr->ai_next))
-				{
-					if (addr->ai_family == AF_INET)
-						break;
-				}
-
+				while (addr && (addr->ai_family != AF_INET6))
+					addr = addr->ai_next;
 				if (!addr)
 					addr = result;
 			}
 
+			/* We want to force IPvX, abort if not detected */
+			const UINT32 IPvX = freerdp_settings_get_uint32(settings, FreeRDP_ForceIPvX);
+			switch (IPvX)
+			{
+				case 4:
+				case 6:
+				{
+					const int family = (IPvX == 4) ? AF_INET : AF_INET6;
+					while (addr && (addr->ai_family != family))
+						addr = addr->ai_next;
+					if (!addr)
+					{
+						freerdp_set_last_error_if_not(context, FREERDP_ERROR_DNS_NAME_NOT_FOUND);
+						freeaddrinfo(result);
+						return -1;
+					}
+				}
+				break;
+				default:
+					break;
+			}
+
+			if (!addr)
+			{
+				freerdp_set_last_error_if_not(context, FREERDP_ERROR_DNS_NAME_NOT_FOUND);
+				freeaddrinfo(result);
+				return -1;
+			}
 			sockfd = socket(addr->ai_family, addr->ai_socktype, addr->ai_protocol);
 
 			if (sockfd < 0)
